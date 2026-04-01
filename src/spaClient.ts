@@ -1063,8 +1063,10 @@ export class SpaClient {
         } else if (this.equal(msgType, GetFaultsReply)) {
             stateChanged = this.readFaults(contents);
         } else if (this.equal(msgType, ControlTypesReply)) {
-            this.log.info("Control types reply(" + this.prettify(msgType) 
-             + "):"+ this.prettify(contents));
+            if (!this.accurateConfigReadFromSpa) {
+                this.log.info("Control types reply(" + this.prettify(msgType)
+                 + "):"+ this.prettify(contents));
+            }
             stateChanged = this.interpretControlTypesReply(contents);
         } else if (this.equal(msgType, ConfigReply)) {
             this.log.info("Config reply with MAC address (" + this.prettify(msgType) 
@@ -1241,7 +1243,7 @@ export class SpaClient {
      */
     interpretControlTypesReply(bytes: Uint8Array) {
         if (this.accurateConfigReadFromSpa) {
-            this.log.info("Already discovered Spa configuration.");
+            this.log.debug("Already discovered Spa configuration.");
             return false;
         }
         // 2 bits per pump. Pumps 5 and 6 are apparently P6xxxxP5 in the second byte
