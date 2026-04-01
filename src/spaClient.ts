@@ -46,6 +46,13 @@ const ControlPanelRequest : Uint8Array[][] = [
 // Perhaps something to do with ChromaZone
 const KnownUnknownReply = new Uint8Array([0xff,0xaf,0x32]);
 
+// Connection reliability constants
+const RECONNECT_DELAY_MIN_MS = 2000;
+const RECONNECT_DELAY_MAX_MS = 60000;
+const CONNECT_TIMEOUT_MS = 10000;
+const STALE_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const KEEPALIVE_INITIAL_DELAY_MS = 10000;
+
 export class SpaClient {
     socket?: net.Socket;
     // undefined means the light doesn't exist on the spa
@@ -69,9 +76,9 @@ export class SpaClient {
     // Is Spa set to operate in FAHRENHEIT or CELSIUS
     temp_CorF: string;
 
-    // If temp_CorF is FAHRENHEIT, temperatures are all stored as degrees F, integers 
+    // If temp_CorF is FAHRENHEIT, temperatures are all stored as degrees F, integers
     // (so the resolution is 1 degree F).
-    // If temp_CorF is CELSIUS, temperatures are all stored as 2x degrees C, integers 
+    // If temp_CorF is CELSIUS, temperatures are all stored as 2x degrees C, integers
     // (so the resolution is 0.5 degrees C).
     currentTemp?: number;
     // When spa is in 'high' mode, what is the target temperature
@@ -80,7 +87,7 @@ export class SpaClient {
     targetTempModeLow?: number;
     // Is spa in low or high mode.
     tempRangeIsHigh: boolean;
-    // Time of day, based on the last message we've received, according to the Spa 
+    // Time of day, based on the last message we've received, according to the Spa
     // (sync it with the Balboa mobile app if you wish)
     hour: number;
     minute: number;
@@ -97,6 +104,10 @@ export class SpaClient {
     hold: boolean;
     receivedStateUpdate: boolean;
     autoSetSpaClock: boolean = true;
+
+    // Reconnect backoff state
+    private reconnectDelay: number = RECONNECT_DELAY_MIN_MS;
+    private connectTimeoutId: any;
 
     // Takes values from FLOW_STATES
     flow: string;
@@ -171,32 +182,58 @@ export class SpaClient {
             this.log.error("Already connected, should not be trying again.");
         }
 
-        this.log.debug("Connecting to Spa at", host, "on port 4257");
+        this.log.info("Connecting to Spa at", host, "on port 4257 (backoff:", this.reconnectDelay + "ms)");
         this.socket = net.connect({
-            port: 4257, 
-            host: host
+            port: 4257,
+            host: host,
         }, () => {
+            // Connection succeeded — clear timeout and reset backoff
+            if (this.connectTimeoutId) {
+                clearTimeout(this.connectTimeoutId);
+                this.connectTimeoutId = undefined;
+            }
+            this.reconnectDelay = RECONNECT_DELAY_MIN_MS;
+
             this.numberOfConnectionsSoFar++;
-            this.liveSinceDate.getUTCDay
             const diff = Math.abs(this.liveSinceDate.getTime() - new Date().getTime());
-            const diffDays = Math.ceil(diff / (1000 * 3600 * 24)); 
-            this.log.info('Successfully connected to Spa at', host, 
+            const diffDays = Math.ceil(diff / (1000 * 3600 * 24));
+            this.log.info('Successfully connected to Spa at', host,
                 'on port 4257. This is connection number', this.numberOfConnectionsSoFar,
                 'in', diffDays, 'days');
             this.successfullyConnectedToSpa();
         });
+
+        // Enable TCP keepalive to detect dead connections at the OS level
+        this.socket.setKeepAlive(true, KEEPALIVE_INITIAL_DELAY_MS);
+
+        // Set a connection timeout — if we can't connect within the limit, give up and retry
+        this.connectTimeoutId = setTimeout(() => {
+            if (!this.isCurrentlyConnectedToSpa) {
+                this.log.warn("Connection attempt timed out after", CONNECT_TIMEOUT_MS + "ms");
+                this.shutdownSpaConnection();
+                this.reconnect(host);
+            }
+        }, CONNECT_TIMEOUT_MS);
+
         this.socket?.on('end', () => {
-            this.log.debug("SpaClient: disconnected:");
-        });
-        // If we get an error, then retry
-        this.socket?.on('error', (error: any) => {
-            this.log.debug(error);
-            this.log.info("Had error - closing old socket, retrying in 20s");
-            
+            this.log.info("SpaClient: connection ended by spa");
             this.shutdownSpaConnection();
             this.reconnect(host);
         });
-        
+
+        this.socket?.on('close', (hadError: boolean) => {
+            this.log.info("SpaClient: socket closed" + (hadError ? " due to error" : ""));
+            if (this.isCurrentlyConnectedToSpa) {
+                this.shutdownSpaConnection();
+                this.reconnect(host);
+            }
+        });
+
+        this.socket?.on('error', (error: any) => {
+            this.log.warn("Socket error:", error.message || error);
+            // close event will fire after this and handle reconnect
+        });
+
         return this.socket;
     }
 
@@ -250,9 +287,8 @@ export class SpaClient {
             }, 10 * 60 * 1000);
         }, 5000);
 
-        // Every 15 minutes, make sure we update the log. And if we haven't
-        // received a state update, then message the spa so it starts sending
-        // us messages again.
+        // Check for stale connection — if no state update received within the interval,
+        // attempt soft recovery first, then force reconnect on second miss.
         if (this.stateUpdateCheckIntervalId) {
             this.log.error("Shouldn't ever already have a state update check interval running here.");
         }
@@ -260,7 +296,7 @@ export class SpaClient {
             if (this.isCurrentlyConnectedToSpa) {
                 this.checkWeHaveReceivedStateUpdate();
             }
-        }, 15 * 60 * 1000)
+        }, STALE_CHECK_INTERVAL_MS)
         
         // Call to ensure we catch up on anything that happened while we
         // were disconnected.
@@ -363,23 +399,33 @@ export class SpaClient {
         return messagesProcessed;
     }   
 
+    private missedStateChecks: number = 0;
+
     checkWeHaveReceivedStateUpdate() {
         if (this.receivedStateUpdate) {
             // All good - reset for next time
+            this.missedStateChecks = 0;
             this.log.info('Latest spa state', this.stateToString());
             this.receivedStateUpdate = false;
 
             // We use this periodic occasion to see if we should correct the Spa's clock
             this.checkAndSetTimeOfDay();
         } else {
-            this.log.error('No spa state update received for some time.  Last state was', 
-                this.stateToString());
-            
-            // TODO - it would be nice if there was a softer way of getting the spa
-            // to start sending the status updates again then a full disconnect, reconnect.
-            // For example, perhaps there is a simple message we send which will trigger that
-            
-            this.socket?.emit("error", Error("no spa update"));
+            this.missedStateChecks++;
+            this.log.warn('No spa state update received (missed checks:', this.missedStateChecks + ').',
+                'Last state was', this.stateToString());
+
+            if (this.missedStateChecks === 1) {
+                // First miss: try a soft recovery by requesting status
+                this.log.info('Attempting soft recovery — sending config request to prompt spa response');
+                this.send_config_request();
+            } else {
+                // Second consecutive miss: force reconnect
+                this.log.warn('Multiple missed state updates — forcing reconnect');
+                this.missedStateChecks = 0;
+                this.shutdownSpaConnection();
+                this.reconnect(this.host);
+            }
         }
     }
 
@@ -387,20 +433,24 @@ export class SpaClient {
     reconnect(host: string) {
         if (!this.reconnecting) {
             this.reconnecting = true;
+            const delay = this.reconnectDelay;
+            this.log.info("Reconnecting in", delay + "ms");
+            // Exponential backoff: double delay each attempt, capped at max
+            this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_DELAY_MAX_MS);
             setTimeout(() => {
                 this.socket = this.get_socket(host);
                 this.reconnecting = false;
-            }, 20000);
+            }, delay);
         }
     }
 
-    // Used if we get an error on the socket, as well as during shutdown.
-    // If we got an error, after this the code will retry to recreate the
-    // connection (elsewhere).
     shutdownSpaConnection() {
-        // Might already be disconnected, if we're in a repeat error situation.
         this.isCurrentlyConnectedToSpa = false;
         this.log.debug("Shutting down Spa socket");
+        if (this.connectTimeoutId) {
+            clearTimeout(this.connectTimeoutId);
+            this.connectTimeoutId = undefined;
+        }
         if (this.faultCheckIntervalId) {
             clearInterval(this.faultCheckIntervalId);
             this.faultCheckIntervalId = undefined;
@@ -409,9 +459,9 @@ export class SpaClient {
             clearInterval(this.stateUpdateCheckIntervalId);
             this.stateUpdateCheckIntervalId = undefined;
         }
-        // Not sure I understand enough about these sockets to be sure
-        // of best way to clean them up.
         if (this.socket != undefined) {
+            // Remove all listeners before destroying to avoid triggering reconnect loops
+            this.socket.removeAllListeners();
             this.socket.end();
             this.socket.destroy();
             this.socket = undefined;
