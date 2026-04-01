@@ -50,9 +50,10 @@ const KnownUnknownReply = new Uint8Array([0xff,0xaf,0x32]);
 const RECONNECT_DELAY_MIN_MS = 2000;
 const RECONNECT_DELAY_MAX_MS = 60000;
 const CONNECT_TIMEOUT_MS = 10000;
-const STALE_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+const STALE_CHECK_INTERVAL_MS = 30 * 1000; // 30 seconds — spa sends data every ~1s, so 30s silence means trouble
 const KEEPALIVE_INITIAL_DELAY_MS = 10000;
-const KEEPALIVE_PING_INTERVAL_MS = 30 * 1000; // 30 seconds
+const KEEPALIVE_PING_INTERVAL_MS = 15 * 1000; // 15 seconds — matches pybalboa's proven threshold
+const PREVENTIVE_RECONNECT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24 hours — clears accumulated module state
 
 export class SpaClient {
     socket?: net.Socket;
@@ -123,8 +124,13 @@ export class SpaClient {
     faultCheckIntervalId: any;
     stateUpdateCheckIntervalId: any;
     keepalivePingIntervalId: any;
+    preventiveReconnectIntervalId: any;
     // Can be set in the overall config to provide more detailed logging
     devMode: boolean;
+
+    // Firmware/model info logged on first connect
+    firmwareVersion: string = 'unknown';
+    systemModel: string = 'unknown';
 
     lastStateBytes = new Uint8Array();
     lastFaultBytes = new Uint8Array();
@@ -199,8 +205,9 @@ export class SpaClient {
             this.numberOfConnectionsSoFar++;
             const diff = Math.abs(this.liveSinceDate.getTime() - new Date().getTime());
             const diffDays = Math.ceil(diff / (1000 * 3600 * 24));
+            const modelInfo = this.systemModel !== 'unknown' ? ' (' + this.systemModel + ', ' + this.firmwareVersion + ')' : '';
             this.log.info('Successfully connected to Spa at', host,
-                'on port 4257. This is connection number', this.numberOfConnectionsSoFar,
+                'on port 4257.' + modelInfo, 'Connection #' + this.numberOfConnectionsSoFar,
                 'in', diffDays, 'days');
             this.successfullyConnectedToSpa();
         });
@@ -312,6 +319,19 @@ export class SpaClient {
             }
         }, KEEPALIVE_PING_INTERVAL_MS);
 
+        // Preventive reconnect — gracefully disconnect and reconnect every 24 hours
+        // to clear any accumulated state in the WiFi module firmware.
+        if (this.preventiveReconnectIntervalId) {
+            this.log.error("Shouldn't ever already have a preventive reconnect interval running here.");
+        }
+        this.preventiveReconnectIntervalId = setInterval(() => {
+            if (this.isCurrentlyConnectedToSpa) {
+                this.log.info('Preventive reconnect — refreshing connection after 24 hours');
+                this.shutdownSpaConnection();
+                this.reconnect(this.host);
+            }
+        }, PREVENTIVE_RECONNECT_INTERVAL_MS);
+
         // Call to ensure we catch up on anything that happened while we
         // were disconnected.
         this.reconnectedCallback();
@@ -415,11 +435,17 @@ export class SpaClient {
 
     private missedStateChecks: number = 0;
 
+    private successfulStateChecks: number = 0;
+
     checkWeHaveReceivedStateUpdate() {
         if (this.receivedStateUpdate) {
             // All good - reset for next time
             this.missedStateChecks = 0;
-            this.log.info('Latest spa state', this.stateToString());
+            this.successfulStateChecks++;
+            // Log state every ~5 minutes (every 10th check at 30s intervals) to avoid log spam
+            if (this.successfulStateChecks % 10 === 1) {
+                this.log.info('Latest spa state', this.stateToString());
+            }
             this.receivedStateUpdate = false;
 
             // We use this periodic occasion to see if we should correct the Spa's clock
@@ -476,6 +502,10 @@ export class SpaClient {
         if (this.keepalivePingIntervalId) {
             clearInterval(this.keepalivePingIntervalId);
             this.keepalivePingIntervalId = undefined;
+        }
+        if (this.preventiveReconnectIntervalId) {
+            clearInterval(this.preventiveReconnectIntervalId);
+            this.preventiveReconnectIntervalId = undefined;
         }
         if (this.socket != undefined) {
             // Remove all listeners before destroying to avoid triggering reconnect loops
@@ -1344,8 +1374,10 @@ export class SpaClient {
             const configurationSignature = Buffer.from(contents.slice(13,17)).toString('hex').toUpperCase();
             // This is most of the information that shows up in the Spa display
             // when you go to the info screen.
-            this.log.info("System Model", motherboard);
-            this.log.info("SoftwareID (SSID)",softwareID);
+            this.systemModel = motherboard.trim();
+            this.firmwareVersion = softwareID;
+            this.log.info("System Model", this.systemModel);
+            this.log.info("SoftwareID (SSID)", this.firmwareVersion);
             this.log.info("Current Setup",currentSetup);
             this.log.info("Configuration Signature",configurationSignature);
             // Not sure what the last 4 bytes 03-0a-44-00 mean
