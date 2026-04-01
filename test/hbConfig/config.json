@@ -7,7 +7,7 @@
     },
     "description": "HomeBridge HTTP Status Control",
     "plugins": [
-        "homebridge-balboa-spa",
+        "homebridge-balboa-spa-improved",
         "homebridge-config-ui-x"
     ],
     "platforms": [
@@ -25,7 +25,7 @@
         {
             "name": "Spa",
             "autoCreateAccessories": true,
-            "platform": "Balboa-Spa"
+            "platform": "Balboa-Spa-Improved"
         }
     ],
     "accessories": []

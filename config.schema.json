@@ -1,5 +1,5 @@
 {
-  "pluginAlias": "Balboa-Spa",
+  "pluginAlias": "Balboa-Spa-Improved",
   "pluginType": "platform",
   "headerDisplay": "This plugin works with Balboa-Spa wifi modules. Each pump, lights, etc are exposed HomeKit as separate accessories. In most situations, if you're fine with the defaults, the configuration is automatic. Else you can give your Spa a name below, and modify other settings...",
   "singular": true,
