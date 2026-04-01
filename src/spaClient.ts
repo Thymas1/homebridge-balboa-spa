@@ -52,6 +52,7 @@ const RECONNECT_DELAY_MAX_MS = 60000;
 const CONNECT_TIMEOUT_MS = 10000;
 const STALE_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
 const KEEPALIVE_INITIAL_DELAY_MS = 10000;
+const KEEPALIVE_PING_INTERVAL_MS = 30 * 1000; // 30 seconds
 
 export class SpaClient {
     socket?: net.Socket;
@@ -121,6 +122,7 @@ export class SpaClient {
     // Stored so that we can cancel intervals if needed
     faultCheckIntervalId: any;
     stateUpdateCheckIntervalId: any;
+    keepalivePingIntervalId: any;
     // Can be set in the overall config to provide more detailed logging
     devMode: boolean;
 
@@ -298,6 +300,18 @@ export class SpaClient {
             }
         }, STALE_CHECK_INTERVAL_MS)
         
+        // Periodic keepalive ping — sends a lightweight request to prevent the
+        // Balboa WiFi module from dropping idle connections.
+        if (this.keepalivePingIntervalId) {
+            this.log.error("Shouldn't ever already have a keepalive ping interval running here.");
+        }
+        this.keepalivePingIntervalId = setInterval(() => {
+            if (this.isCurrentlyConnectedToSpa) {
+                this.log.debug("Sending keepalive ping");
+                this.sendControlTypesRequest();
+            }
+        }, KEEPALIVE_PING_INTERVAL_MS);
+
         // Call to ensure we catch up on anything that happened while we
         // were disconnected.
         this.reconnectedCallback();
@@ -458,6 +472,10 @@ export class SpaClient {
         if (this.stateUpdateCheckIntervalId) {
             clearInterval(this.stateUpdateCheckIntervalId);
             this.stateUpdateCheckIntervalId = undefined;
+        }
+        if (this.keepalivePingIntervalId) {
+            clearInterval(this.keepalivePingIntervalId);
+            this.keepalivePingIntervalId = undefined;
         }
         if (this.socket != undefined) {
             // Remove all listeners before destroying to avoid triggering reconnect loops
