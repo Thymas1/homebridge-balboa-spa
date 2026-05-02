@@ -40,3 +40,18 @@ All in `spaClient.ts`:
 - Keepalive ping every 30s (ControlTypes request)
 - Connection timeout: 10s
 - Stale check every 2min with soft recovery before forced reconnect
+
+## In-progress: Elfin-EW11 hardware swap
+
+The Balboa WiFi module is being replaced with an Elfin-EW11 (RS-485 ↔ WiFi
+bridge) for connection stability. The TCP-on-port-4257 protocol stays the
+same; the EW11 reuses the same IP `192.168.72.43`, so no plugin config
+changes are needed. **Bench config is complete and verified; physical
+install is paused mid-procedure.**
+
+See **[`docs/elfin-swap/`](docs/elfin-swap/)** for the full context:
+- `README.md` — overview and current status checklist
+- `EW11-CONFIG.md` — every setting on the EW11 device
+- `SPA-HARDWARE.md` — spa pack and connector identification
+- `INSTALL-PROCEDURE.md` — step-by-step procedure to resume from
+- `TROUBLESHOOTING.md` — gotchas we hit during bench config
