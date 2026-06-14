@@ -369,7 +369,9 @@ export class SpaClient {
 
         while (chunk.length > 0) {
             if (chunk.length < 2) {
-                this.log.error("Very short message received (ignored)", this.prettify(chunk));
+                // Debug only: lone fragments (e.g. a stray '7e') from EW11 buffer-boundary
+                // splits are expected on a shared bus and handled gracefully.
+                this.log.debug("Very short message received (ignored)", this.prettify(chunk));
                 break;
             }
             // Length is the length of the message, which excludes the checksum and 0x7e end.
@@ -391,7 +393,10 @@ export class SpaClient {
                     const checksum = thisMsg[msgLength];
                     // Seems like a good message. Check the checksum is ok
                     if (checksum != this.compute_checksum(new Uint8Array([msgLength]), thisMsg.slice(2,msgLength))) {
-                        this.log.error("Bad checksum", checksum, "for", this.prettify(thisMsg));
+                        // Warn (not error): occasional bad checksums happen on a shared RS485
+                        // bus / at chunk-reassembly edges; rare and self-correcting. A sustained
+                        // spike here would indicate a real signal-integrity problem worth checking.
+                        this.log.warn("Bad checksum", checksum, "for", this.prettify(thisMsg));
                     } else {
                         const somethingChanged = this.readAndActOnMessage(msgLength, checksum, thisMsg);
                         if (somethingChanged) {
@@ -423,8 +428,10 @@ export class SpaClient {
                 }
                 messagesProcessed++;
             } else {
-                // Message didn't start/end correctly
-                this.log.error("Message with bad terminations encountered:", this.prettify(chunk));
+                // Message didn't start/end correctly. Debug only: this is normal when a
+                // TCP chunk from the EW11 begins mid-frame (buffer/gap-time splits a frame
+                // across packets). The parser resyncs on the next 0x7e, so it's non-critical.
+                this.log.debug("Message with bad terminations encountered:", this.prettify(chunk));
             }
             // Process rest of the chunk, as needed (go round the while loop).
             // It might contain more messages
@@ -1125,8 +1132,12 @@ export class SpaClient {
             // Various messages about controls, filters, etc. In theory we could
             // choose to implement more things here, but limited value in it.
             if (!recognised) {
-                this.log.info("Not understood a received spa message", 
-                "(nothing critical, but please do report this):" + this.prettify(msgType), 
+                // Logged at debug only: on a shared RS485 bus (e.g. via an Elfin-EW11)
+                // we see every frame, including polls and messages addressed to other
+                // devices (topside panel etc.). These are expected and non-critical, so
+                // logging at info floods the log (~140k lines/few days). Enable debug to see them.
+                this.log.debug("Not understood a received spa message",
+                "(nothing critical):" + this.prettify(msgType),
                 " contents: "+ this.prettify(contents));
             }
         }
